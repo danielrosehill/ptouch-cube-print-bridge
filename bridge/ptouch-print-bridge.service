@@ -1,0 +1,14 @@
+[Unit]
+Description=Label print bridge (Brother PT-P710BT via ptouch-print)
+After=network.target
+
+[Service]
+# Adjust user + path for your host. The user needs USB access to the printer
+# (covered by ptouch-print's udev rule).
+User=youruser
+ExecStart=/usr/bin/python3 /home/youruser/print-bridge/bridge.py
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
