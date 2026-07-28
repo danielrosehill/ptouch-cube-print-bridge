@@ -103,7 +103,15 @@ the VM's 10.0.0.x address.
 
 1. `win-utility up`, then open <https://remote.residencejlm.com> and pick
    *win-utility (console)*.
-2. In Windows, install the PT-P710BT driver + **Printer Setting Tool** from Brother.
+2. In Windows, install Brother's **"Software/Document Installer (Recommended)"** for
+   Windows 10 64-bit, from the [PT-P710BT downloads page](https://support.brother.com/g/b/downloadtop.aspx?c=us&lang=en&prod=p710bteus).
+
+   **There is no standalone Printer Setting Tool download** — it ships only inside
+   that bundle. When you pass the printer through, Windows will pop *"Device is ready
+   — Brother PT-P710BT is set up and ready to go"* and install its own in-box driver;
+   that driver prints and nothing else. It looks like success and leaves you hunting
+   for a settings pane that was never installed. Do **not** substitute *P-touch
+   Editor* or *P-touch Update Software* — neither contains Device Settings.
 3. **Press the printer's power button**, then `win-utility printer-attach`.
    The printer must be awake — when it sleeps it leaves the USB bus entirely and
    there is nothing to pass through. You then have <60 min to finish, which is the
@@ -125,3 +133,21 @@ re-cabling, and host swaps.
   rule the bridge follows, so replugging into a different port doesn't break it.
 - If `virsh attach-device` reports the device is busy, the bridge still holds it;
   `systemctl stop wms-print-bridge` and retry.
+- **If the printer sleeps mid-session, re-attaching is not optional.** libvirt resolves
+  vendor:product to a concrete `<address bus='3' device='N'/>` at attach time. When the
+  printer sleeps it leaves the bus, and pressing the power button brings it back as
+  `device='N+1'` — so the VM is left pointing at an address that no longer exists. The
+  printer looks awake on the host (`lsusb` shows it) while Windows sees nothing, and
+  Printer Setting Tool shows an empty printer dropdown. Diagnosed 2026-07-28 as
+  "the settings pane is broken"; it wasn't. Fix:
+
+  ```bash
+  win-utility printer-detach && win-utility printer-attach
+  ```
+
+  Confirm afterwards that the XML names the live device:
+  `virsh dumpxml win-utility | grep "address bus"` against `lsusb -d 04f9:20af`.
+- The guest has **no qemu-guest-agent**, so `virsh shutdown` is pure ACPI and a
+  blocking dialog in Windows will silently defeat it. If the domain stays `running`
+  for minutes after a shutdown request, log in and close the dialog rather than
+  reaching for `virsh destroy`.
