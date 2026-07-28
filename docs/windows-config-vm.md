@@ -71,15 +71,38 @@ locked personalisation settings. Fine for a config-tool VM, and unlike an Enterp
 
 ```bash
 win-utility up                # start
-win-utility view              # prints the exact SSH tunnel + VNC command
+win-utility view              # prints the SSH tunnel + VNC command (fallback route)
 win-utility printer-attach    # hand the printer to the VM
 win-utility printer-detach    # give it back, restart the bridge
 win-utility down              # graceful shutdown
 ```
 
+### Getting a screen on it
+
+Preferred: **Apache Guacamole at <https://remote.residencejlm.com>** — browser-based,
+no client, behind Cloudflare Access. A connection named *win-utility (console)* is
+already defined, pointing at the libvirt VNC console on `127.0.0.1:5901`.
+
+That loopback address is why `guacd` runs with `network_mode: host` in
+`/root/guacamole/docker-compose.yml`. libvirt binds VNC to `127.0.0.1` only (correctly),
+and a bridge-networked container cannot see host loopback. Host-networking `guacd` is
+the fix that avoids widening the VNC bind. `guacamole` and `guac-db` stay on a normal
+bridge network and reach `guacd` via `hostgw:host-gateway`.
+
+Fallback if Guacamole is down — tunnel to the console directly:
+
+```bash
+ssh -L 5901:127.0.0.1:5901 residencehome-root   # then a VNC client at localhost:5901
+```
+
+Once Windows is installed and has a LAN address from `br0`, an RDP connection is nicer
+than the VNC console (clipboard, resolution, sound). Add it in Guacamole pointing at
+the VM's 10.0.0.x address.
+
 ## Setting auto power-off
 
-1. `win-utility up`, then `win-utility view` and connect.
+1. `win-utility up`, then open <https://remote.residencejlm.com> and pick
+   *win-utility (console)*.
 2. In Windows, install the PT-P710BT driver + **Printer Setting Tool** from Brother.
 3. **Press the printer's power button**, then `win-utility printer-attach`.
    The printer must be awake — when it sleeps it leaves the USB bus entirely and
