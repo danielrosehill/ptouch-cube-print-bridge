@@ -89,9 +89,20 @@ On a headless Linux host the practical route is a throwaway/on-demand Windows VM
 the printer passed through by vendor:product id (`04f9:20af`), which is what
 [`docs/windows-config-vm.md`](windows-config-vm.md) covers.
 
-Until it's set, design for the power-off: the bridge's `/health` probe fails while the
-printer is off, so the app can show "printer offline — is it powered on?" instead of a
-dead Print button.
+**Applied 2026-07-28 on the residencehome printer** via the throwaway Windows VM. The
+value is in NVRAM, so this should not need doing again — but if the printer is ever
+factory-reset (hold power while inserting the cassette, or *Reset* in the Setting
+Tool), it reverts to 60 min and the whole exercise repeats.
+
+Verification is free and needs no extra tooling: the bridge's keepalive logs a state
+transition whenever the printer becomes unreachable, so an *absence* of "printer
+unreachable" in `journalctl -u wms-print-bridge` across a >60 min idle window is the
+proof. The keepalive can't keep the printer awake, but it is exactly the right
+instrument for proving it no longer sleeps.
+
+Even with auto power-off disabled, still design for the printer being off — someone
+can always press the button. The bridge's `/health` probe fails while it's off, so the
+app can show "printer offline — is it powered on?" instead of a dead Print button.
 
 ## Status error codes seen in practice
 
