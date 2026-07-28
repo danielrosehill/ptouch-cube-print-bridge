@@ -43,6 +43,8 @@ flowchart LR
 | [`snippets/render-label.ts`](snippets/render-label.ts) | Browser-side label renderer: tape presets, QR code + big readable ID + item name with adaptive font shrinking/wrapping for long names. |
 | [`snippets/proxy-endpoint.ts`](snippets/proxy-endpoint.ts) | Example server proxy endpoints (Nitro/h3 style, trivially portable to Express) between the HTTPS app and the bridge. |
 | [`docs/hardware-notes.md`](docs/hardware-notes.md) | Everything I learned the hard way: error codes, the blank-leader problem and `--precut`, auto power-off behaviour, print head geometry. |
+| [`docs/windows-config-vm.md`](docs/windows-config-vm.md) | Killing auto power-off for good, from a headless Linux host: building a Windows ISO with UUP dump, an on-demand KVM guest, and USB passthrough of the printer. |
+| [`scripts/win-utility.sh`](scripts/win-utility.sh) | `up` / `down` / `view` / `printer-attach` / `printer-detach` wrapper for that VM. |
 
 ## Setup (bridge host)
 
