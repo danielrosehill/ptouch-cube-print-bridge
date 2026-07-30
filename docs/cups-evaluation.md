@@ -117,12 +117,31 @@ CUPS driver, and no fork of `ptouch-print`, can reach it. See
 Two features *are* in-protocol but unexposed by `ptouch-print`, if ever wanted:
 mirror printing (`ESC i M` bit 7) and high-resolution mode (`ESC i K` bit 6).
 
-## Deployment drift worth knowing
+## Deployment: run from a checkout
 
-The unit deployed on `residencehome` is `wms-print-bridge.service`, running
-`/home/daniel/wms-print-bridge/bridge.py`. This repo ships the generically-named
-`bridge/ptouch-print-bridge.service` as the published example. Same service,
-different names.
+Until 2026-07-30 the deployed service ran a loose copy of `bridge.py` in a directory
+with no git remote. It silently drifted 247 lines ahead of this repo — the keepalive
+probe, `PRINT_LOCK` and the settle/verify timing all existed only on the host, while
+the docs commits of 28 Jul described behaviour whose code was never committed.
+
+The fix is structural rather than procedural: **the service executes the file inside a
+clone of this repo**, so the running code and the tracked code cannot diverge.
+
+```ini
+ExecStart=/usr/bin/python3 /home/youruser/ptouch-cube-print-bridge/bridge/bridge.py
+```
+
+Deploying a change is then `git pull && systemctl restart <unit>`, and
+`git -C <clone> status --porcelain` answers "is the host running anything unpushed?"
+at a glance. On `residencehome` the unit is `wms-print-bridge.service` and the clone
+is at `/home/daniel/ptouch-cube-print-bridge`; the retired directory was kept as
+`wms-print-bridge.superseded-20260730` rather than deleted.
+
+The host authenticates to GitHub over HTTPS through git's credential store, so pulls
+need no interactive login. Nothing about that belongs in this repo — no token, no
+`.env`. Note that an SSH *deploy* key is scoped to a single repository and greets you
+as `owner/repo` rather than as your account, which is a confusing way to discover that
+a host cannot push to anything else.
 
 ## Confirmed vs inferred
 
