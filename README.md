@@ -37,13 +37,14 @@ flowchart LR
 
 | Path | What it is |
 |---|---|
-| [`bridge/bridge.py`](bridge/bridge.py) | Stdlib-only Python HTTP bridge: `GET /health`, `POST /print`. Wraps `ptouch-print`, scales the PNG to the tape's printable height, prints one job per copy so the auto-cutter separates labels. |
+| [`bridge/bridge.py`](bridge/bridge.py) | Stdlib-only Python HTTP bridge: `GET /health`, `POST /print`. Wraps `ptouch-print`, scales the PNG to the tape's printable height, prints one job per copy so the auto-cutter separates labels. Serialises jobs under a lock, waits for the physical print to settle before verifying, and runs an optional keepalive probe that reports reachability in `/health` without touching the bus mid-job. |
 | [`bridge/ptouch-print-bridge.service`](bridge/ptouch-print-bridge.service) | systemd unit to keep it running. |
 | [`patches/ptouch-print-p710bt-init.patch`](patches/ptouch-print-p710bt-init.patch) | **Required** one-line fix for `ptouch-print`: the PT-P710BT needs the P700-family init sequence; without it every job silently fails with a media error. |
 | [`snippets/render-label.ts`](snippets/render-label.ts) | Browser-side label renderer: tape presets, QR code + big readable ID + item name with adaptive font shrinking/wrapping for long names. |
 | [`snippets/proxy-endpoint.ts`](snippets/proxy-endpoint.ts) | Example server proxy endpoints (Nitro/h3 style, trivially portable to Express) between the HTTPS app and the bridge. |
 | [`docs/hardware-notes.md`](docs/hardware-notes.md) | Everything I learned the hard way: error codes, the blank-leader problem and `--precut`, auto power-off behaviour, print head geometry. |
 | [`docs/windows-config-vm.md`](docs/windows-config-vm.md) | Killing auto power-off for good, from a headless Linux host: building a Windows ISO with UUP dump, an on-demand KVM guest, and USB passthrough of the printer. |
+| [`docs/cups-evaluation.md`](docs/cups-evaluation.md) | Why the bridge owns the device instead of feeding through a CUPS queue, what a P710BT CUPS driver would actually give you, and the inverted design to use if you want a generic queue anyway. |
 | [`scripts/win-utility.sh`](scripts/win-utility.sh) | `up` / `down` / `view` / `printer-attach` / `printer-detach` wrapper for that VM. |
 
 ## Setup (bridge host)
