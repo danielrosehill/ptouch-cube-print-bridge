@@ -5,8 +5,12 @@ After=network.target
 [Service]
 # Adjust user + path for your host. The user needs USB access to the printer
 # (covered by ptouch-print's udev rule).
+#
+# Point ExecStart at a *clone of this repo* rather than a copy of bridge.py. Then
+# deploying is `git pull && systemctl restart`, and the running code cannot silently
+# drift ahead of what is committed. See docs/cups-evaluation.md.
 User=youruser
-ExecStart=/usr/bin/python3 /home/youruser/print-bridge/bridge.py
+ExecStart=/usr/bin/python3 /home/youruser/ptouch-cube-print-bridge/bridge/bridge.py
 Restart=on-failure
 RestartSec=3
 
