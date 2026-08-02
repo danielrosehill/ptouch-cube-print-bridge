@@ -1,0 +1,16 @@
+# PT-P710BT (04f9:20af) USB access for the print bridge.
+#
+# ptouch-print ships 20-usb-ptouch-permissions.rules, which sets MODE="0660" and
+# TAG+="uaccess". That is enough for a desktop user sitting at the machine, but
+# uaccess grants its ACL only to a user with an active *local seat* session. On a
+# headless server there is no seat, so no ACL is granted, the node is left
+# root:lp 0660, and a service user outside group lp cannot open it.
+#
+# Symptom when this is missing: the bridge starts cleanly and only fails at print
+# time, with "libusb_open error :LIBUSB_ERROR_ACCESS" from /health.
+#
+# Set the group explicitly rather than relying on rule-ordering with the distro
+# rules, then give the service user membership via SupplementaryGroups= in the unit.
+# Matching is on idVendor/idProduct, so this is independent of which USB port the
+# printer is plugged into and survives replugging and reboots.
+SUBSYSTEM=="usb", ATTRS{idVendor}=="04f9", ATTRS{idProduct}=="20af", GROUP="lp", MODE="0660"

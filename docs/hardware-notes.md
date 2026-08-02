@@ -20,6 +20,41 @@ stays in that error state until power-cycled and refuses subsequent jobs.
 The P710BT shares its print engine with the PT-P700/P750W, which both carry
 `FLAG_P700_INIT`. Adding the flag (see `patches/`) fixes it completely.
 
+## USB permissions on a headless host (the `uaccess` trap)
+
+`ptouch-print` installs `20-usb-ptouch-permissions.rules`, which sets `MODE="0660"`
+and `TAG+="uaccess"` on the printer. On a desktop that is all you need. On a headless
+server it grants **nothing**, and the difference is easy to miss because the rule
+plainly did fire.
+
+`uaccess` is a systemd-logind mechanism: it adds an ACL for the user of an active
+*local seat* session. A server has no seat, so no ACL is ever added. The node is left
+`root:lp 0660`, and any service user outside group `lp` cannot open it. `getfacl` on
+the node shows only the base entries — no `user:` lines — which is the tell.
+
+The symptom is nastier than a startup failure: the bridge starts cleanly, and only
+print attempts fail, with
+
+```
+PT-P710BT found on USB bus 1, device 3
+libusb_open error :LIBUSB_ERROR_ACCESS
+```
+
+Two things fix it durably, both in this repo:
+
+- `udev/99-ptouch-print-bridge.rules` sets `GROUP="lp"` explicitly, instead of relying
+  on rule-ordering with the distro rules to supply the group.
+- `SupplementaryGroups=lp` in the systemd unit puts the service user in that group.
+
+Both match on `idVendor`/`idProduct`, so neither depends on which USB port is used —
+the grant survives replugging into a different port, and survives reboots. Do **not**
+fix this with a one-off `chmod` or `setfacl` on `/dev/bus/usb/...`: it works until the
+next reboot or replug and then fails in a way that looks like a hardware fault.
+
+Prefer `SupplementaryGroups=` in the unit over `usermod -aG lp <user>`. It is scoped to
+the service, visible in the unit file next to the thing that needs it, and takes effect
+on `systemctl restart` rather than needing the user to log out and back in.
+
 ## The blank leader and `--precut`
 
 The print head sits ~25mm behind the cutter, so every job mechanically feeds ~25mm of
