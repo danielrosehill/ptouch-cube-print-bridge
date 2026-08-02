@@ -3,8 +3,14 @@ Description=Label print bridge (Brother PT-P710BT via ptouch-print)
 After=network.target
 
 [Service]
-# Adjust user + path for your host. The user needs USB access to the printer
-# (covered by ptouch-print's udev rule).
+# Adjust user + path for your host.
+#
+# SupplementaryGroups=lp is required, not optional. udev/99-ptouch-print-bridge.rules
+# leaves the device node as root:lp 0660; ptouch-print's own rule relies on uaccess,
+# which grants nothing to a headless service user. Without this line the service
+# starts fine and fails only at print time with LIBUSB_ERROR_ACCESS. See
+# docs/hardware-notes.md.
+SupplementaryGroups=lp
 #
 # Point ExecStart at a *clone of this repo* rather than a copy of bridge.py. Then
 # deploying is `git pull && systemctl restart`, and the running code cannot silently
