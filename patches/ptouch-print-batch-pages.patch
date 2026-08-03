@@ -1,0 +1,164 @@
+diff --git a/src/ptouch-print.c b/src/ptouch-print.c
+index 5a8e81c..7151ef4 100644
+--- a/src/ptouch-print.c
++++ b/src/ptouch-print.c
+@@ -57,7 +57,7 @@ struct arguments {
+ 	int timeout;
+ };
+ 
+-typedef enum { JOB_CUTMARK, JOB_IMAGE, JOB_PAD, JOB_TEXT, JOB_UNDEFINED } job_type_t;
++typedef enum { JOB_CUTMARK, JOB_IMAGE, JOB_PAD, JOB_PAGE, JOB_TEXT, JOB_UNDEFINED } job_type_t;
+ 
+ typedef struct job {
+ 	job_type_t type;
+@@ -66,6 +66,16 @@ typedef struct job {
+ 	struct job *next;
+ } job_t;
+ 
++/* A page is one physical label. All pages of a run are printed inside a SINGLE
++   job: every page but the last is finalized with the chain command (print, no
++   feed), so the tape is fed to the cutter only once, at the end. That is what
++   makes a batch cost one ~25mm blank leader instead of one per label, while
++   --precut still cuts the pages apart. Pages are separated by --page. */
++typedef struct page {
++	gdImage *im;
++	struct page *next;
++} page_t;
++
+ gdImage *image_load(const char *file);
+ void rasterline_setpixel(uint8_t* rasterline, size_t size, int pixel);
+ int get_baselineoffset(char *text, char *font, int fsz);
+@@ -78,6 +88,7 @@ gdImage *img_cutmark(int print_width);
+ gdImage *render_text(char *font, char *line[], int lines, int print_width);
+ void unsupported_printer(ptouch_dev ptdev);
+ void add_job(job_type_t type, int n, char *line);
++void add_page(gdImage *im);
+ void add_text(struct argp_state *state, char *arg, bool new_job);
+ static error_t parse_opt(int key, char *arg, struct argp_state *state);
+ 
+@@ -107,6 +118,7 @@ static struct argp_option options[] = {
+ 	{ "pad", 'p', "<n>", 0, "Add n pixels padding (blank tape)", 2},
+ 	{ "chain", 10, 0, 0, "Skip final feed of label and any automatic cut", 2},
+ 	{ "precut", 11, 0, 0, "Add a cut before the label (useful in chain mode for cuts with minimal waste)", 2},
++	{ "page", 12, 0, 0, "End the current label and start a new one. All pages print as one job, so the blank leader is fed once for the whole batch and --precut cuts the labels apart", 2},
+ 	{ "newline", 'n', "<text>", 0, "Add text in a new line (up to 4 lines). \\n will be replaced by a newline", 2},
+ 	{ "align", 'a', "<l|c|r>", 0, "Align text (when printing multiple lines)", 2},
+ 
+@@ -136,6 +148,9 @@ struct arguments arguments = {
+ 
+ job_t *jobs = NULL;
+ job_t *last_added_job = NULL;
++page_t *pages = NULL;
++page_t *last_page = NULL;
++int page_count = 0;
+ 
+ 
+ /* --------------------------------------------------------------------
+@@ -551,6 +566,29 @@ gdImage *img_padding(int print_width, int length)
+ 	return out;
+ }
+ 
++/* Close off the accumulated image as one page. A NULL image (two --page in a
++   row, or a trailing --page) is not a page and is silently ignored. */
++void add_page(gdImage *im)
++{
++	if (!im) {
++		return;
++	}
++	page_t *new_page = (page_t*)malloc(sizeof(page_t));
++	if (!new_page) {
++		printf(_("out of memory\n"));
++		exit(1);
++	}
++	new_page->im = im;
++	new_page->next = NULL;
++	if (!last_page) {
++		pages = last_page = new_page;
++	} else {
++		last_page->next = new_page;
++		last_page = new_page;
++	}
++	++page_count;
++}
++
+ void add_job(job_type_t type, int n, char *line)
+ {
+ 	job_t *new_job = (job_t*)malloc(sizeof(job_t));
+@@ -675,6 +713,9 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state)
+ 		case 10: // chain
+ 			arguments->chain = true;
+ 			break;
++		case 12: // page
++			add_job(JOB_PAGE, 0, NULL);
++			break;
+ 		case 11: // precut
+ 			arguments->precut = true;
+ 			break;
+@@ -804,6 +845,10 @@ int main(int argc, char *argv[])
+ 				gdImageDestroy(im);
+ 				im = NULL;
+ 				break;
++			case JOB_PAGE:
++				add_page(out);
++				out = NULL;
++				break;
+ 			case JOB_PAD:
+ 				im = img_padding(print_width, job->n);
+ 				out = img_append(out, im);
+@@ -822,22 +867,48 @@ int main(int argc, char *argv[])
+ 		job = next;
+ 	}
+ 	jobs = last_added_job = NULL;
++	add_page(out);
++	out = NULL;
+ 
+-	if (out) {
++	if (pages) {
+ 		if (arguments.save_png) {
++			/* --write-png has no notion of pages; concatenate them back into a
++			   single image so the file still shows the whole run. */
++			gdImage *all = NULL;
++			for (page_t *p = pages; p != NULL; p = p->next) {
++				all = img_append(all, p->im);
++			}
+ 			int dpi = ptouch_get_dpi(ptdev);
+-			gdImageSetResolution(out, dpi, dpi);
+-			write_png(out, arguments.save_png);
++			gdImageSetResolution(all, dpi, dpi);
++			write_png(all, arguments.save_png);
++			gdImageDestroy(all);
+ 		} else {
++			/* --copies repeats the whole set, so a multi-page run comes out
++			   collated. Only the very last page of the last copy is finalized
++			   with a feed; everything before it chains, keeping the run to one
++			   leader. Single-page runs are byte-for-byte what they always were. */
++			int total = page_count * arguments.copies;
++			int done = 0;
+ 			for (int i = 0; i < arguments.copies; ++i) {
+-				print_img(ptdev, out, arguments.chain, arguments.precut);
+-				if (ptouch_finalize(ptdev, ( arguments.chain || (i < arguments.copies-1) ) ) != 0) {
+-					printf(_("ptouch_finalize(%d) failed\n"), arguments.chain);
+-					return 2;
++				for (page_t *p = pages; p != NULL; p = p->next) {
++					if (print_img(ptdev, p->im, arguments.chain, arguments.precut) != 0) {
++						return 2;
++					}
++					++done;
++					if (ptouch_finalize(ptdev, ( arguments.chain || (done < total) ) ) != 0) {
++						printf(_("ptouch_finalize(%d) failed\n"), arguments.chain);
++						return 2;
++					}
+ 				}
+ 			}
+ 		}
+-		gdImageDestroy(out);
++		for (page_t *p = pages; p != NULL; ) {
++			page_t *next = p->next;
++			gdImageDestroy(p->im);
++			free(p);
++			p = next;
++		}
++		pages = last_page = NULL;
+ 	}
+ 	if (im != NULL) {
+ 		gdImageDestroy(im);

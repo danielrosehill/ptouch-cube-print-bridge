@@ -1,17 +1,48 @@
 #!/usr/bin/env python3
 """WMS label print bridge — drives the Brother PT-P710BT over USB via ptouch-print.
 
-Runs on residenceserver next to the printer (deployed at
-/home/daniel/wms-print-bridge/bridge.py, systemd unit wms-print-bridge.service).
-The WMS app (on the VPS) proxies authenticated print requests here over Tailscale.
+Runs on residencehome next to the printer (deployed from a checkout at
+/home/daniel/ptouch-cube-print-bridge/bridge/bridge.py, systemd unit
+wms-print-bridge.service). The WMS app (on the VPS) proxies authenticated print
+requests here over Tailscale (100.105.192.28).
 
-  GET  /health -> {ok, printer, tapeMm, maxPx}   (queries the printer over USB)
-  POST /print  -> {imageDataUrl, copies}         (PNG label, landscape: width = along tape)
+  GET  /health      -> {ok, printer, tapeMm, maxPx}   (queries the printer over USB)
+  POST /print       -> {imageDataUrl, copies}         (PNG label, landscape: width = along tape)
+                       {ok, copies, tapeMm, labelMm, tapeUsedMm, rasterPx, attempts, retried}
+  POST /print-batch -> {labels: [{imageDataUrl, copies}, ...]}
+                       {ok, labels, pages, tapeMm, tapeUsedMm, labelsMm, attempts, retried}
 
-The image is scaled so its height fits the printable width of the loaded tape
-(reported by ptouch-print --info), thresholded to 1-bit, and printed as a single
-multi-page job (ptouch-print --copies): the auto-cutter separates the copies but
-the ~25mm blank leader is trimmed only once per batch, not once per copy.
+The reply reports the run's measured geometry so the app can log tape
+consumption: labelMm is one label's length as actually rastered (after scaling
+to the loaded tape), tapeUsedMm adds the once-per-job leader. Both are computed
+here rather than app-side because only the bridge knows the tape the printer
+reports and the raster it produced from it.
+
+Images are scaled so their height fits the printable width of the loaded tape
+(reported by ptouch-print --info) and thresholded to 1-bit.
+
+## Why /print-batch exists: the leader is per *job*, not per label
+
+The print head sits ~25mm behind the cutter, so every job mechanically feeds
+~25mm of blank tape before the printed area; --precut trims that off as a scrap
+piece. Crucially that cost is once per ptouch-print *invocation*, not per label:
+inside one invocation every page but the last is finalized with the chain
+command (0x0C, print without feeding) and only the last gets 0x1A (print with
+feeding), so the tape reaches the cutter once. --precut then cuts the pages
+apart with no further leader.
+
+That is why `--copies N` has always been cheap. It was never available across
+*different* labels, because stock ptouch-print concatenates multiple --image
+arguments into one long label (img_append) rather than paginating them. So a
+batch of N distinct labels meant N invocations and N scrap leaders — which
+defeated the point of batching them at all.
+
+`patches/ptouch-print-batch-pages.patch` adds a `--page` separator that ends the
+current label and starts a new one, giving N distinct labels as N pages of one
+job. This bridge expands copies into repeated pages and sends the whole run in a
+single invocation. Verified against the patched binary; if an unpatched
+ptouch-print is installed, HAS_PAGE is false and the bridge falls back to the
+old one-invocation-per-label behaviour (correct output, N leaders of waste).
 
 ptouch-print exits 0 as soon as the raster data is streamed — a printer-side
 abort (red LED) is invisible to it. So after streaming we hold the USB lock for
@@ -22,8 +53,7 @@ Empirical PT-P710BT failure mode (root-caused 2026-07-21): the Cube refuses USB
 raster jobs while the Brother phone app holds a Bluetooth session — jobs are
 silently discarded with error 0x0100 ("replace media", status_type 0x02, red
 LED), and the state flaps as the phone connects/disconnects. Retries keep
---precut (the auto-cut mode flag; without it labels come out as one uncut
-strip) and failures carry a close-the-phone-app hint.
+--precut and failures carry a close-the-phone-app hint.
 
 The printer is located by USB vendor/product id (04f9:20af), never by port path.
 
@@ -68,11 +98,17 @@ from PIL import Image
 
 PORT = int(os.environ.get("BRIDGE_PORT", "9180"))
 PTOUCH = os.environ.get("PTOUCH_BIN", "/usr/local/bin/ptouch-print")
-MAX_BODY = 8 * 1024 * 1024
+# A batch carries one PNG per label, so the body is much larger than /print's.
+MAX_BODY = 24 * 1024 * 1024
 MAX_COPIES = 20
+# Total pages (labels x copies) in one batch. The whole run is a single job held
+# under the USB lock, so this also bounds how long one request can occupy the
+# printer.
+MAX_PAGES = 60
 THRESHOLD = 160
 DPI = 180            # PT-P710BT print resolution
 TAPE_MM_PER_S = 20   # approximate feed speed, used to estimate job duration
+LEADER_MM = 25       # blank leader fed + trimmed once per job, not per page
 
 # One lock for ALL USB access: any USB command (even a status read) issued while
 # a job is printing can abort it (red LED). The lock is held for the whole
@@ -92,6 +128,22 @@ LAST_PRINT_DONE = [0.0]
 KEEPALIVE_SECONDS = int(os.environ.get("KEEPALIVE_SECONDS", "300"))
 KEEPALIVE_STATE = {"last": 0.0, "ok": None, "skipped": 0}
 LAST_USB_ACTIVITY = time.time()
+
+
+def ptouch_supports_pages() -> bool:
+    """Is the installed ptouch-print carrying patches/ptouch-print-batch-pages.patch?
+
+    Without it there is no way to put two *different* labels in one job, so a
+    batch degrades to one job (and one 25mm scrap leader) per label.
+    """
+    try:
+        r = subprocess.run([PTOUCH, "--help"], capture_output=True, text=True, timeout=10)
+    except Exception:  # noqa: BLE001
+        return False
+    return "--page" in ((r.stdout or "") + (r.stderr or ""))
+
+
+HAS_PAGE = ptouch_supports_pages()
 
 
 def printer_info():
@@ -156,24 +208,66 @@ def prepare_image(data_url: str, max_px: int) -> Image.Image:
     return img.point(lambda p: 0 if p < THRESHOLD else 255, mode="1")
 
 
-def estimate_print_seconds(label_px: int, copies: int) -> float:
-    label_mm = label_px * 25.4 / DPI
-    per_copy = label_mm / TAPE_MM_PER_S + 1.2  # feed + cut
-    return copies * per_copy + 25 / TAPE_MM_PER_S + 1.5  # leader trim + margin
+def label_length_mm(label_px: int) -> float:
+    """Length of one label along the tape, from the raster actually sent."""
+    return label_px * 25.4 / DPI
 
 
-def run_print_job(path: str, copies: int, precut: bool = True):
-    """Stream one multi-page job. Returns (ok, error_message)."""
-    cmd = [PTOUCH, "--copies", str(copies), "--image", path]
-    if precut:
-        cmd.insert(1, "--precut")
-    try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30 + 10 * copies)
-    except subprocess.TimeoutExpired:
-        return False, "print timed out"
-    if r.returncode != 0:
-        return False, (r.stdout + r.stderr).strip() or f"ptouch-print exited {r.returncode}"
-    return True, ""
+def estimate_print_seconds(page_px: list) -> float:
+    """Physical time for a run of pages, each `page_px` wide along the tape."""
+    feed = sum(label_length_mm(px) for px in page_px) / TAPE_MM_PER_S
+    return feed + 1.2 * len(page_px) + LEADER_MM / TAPE_MM_PER_S + 1.5  # cuts + leader + margin
+
+
+def _group_consecutive(paths: list):
+    """[a, a, b] -> [(a, 2), (b, 1)] — the fallback's --copies groupings."""
+    groups = []
+    for p in paths:
+        if groups and groups[-1][0] == p:
+            groups[-1][1] += 1
+        else:
+            groups.append([p, 1])
+    return groups
+
+
+def run_print_job(paths: list, precut: bool = True):
+    """Stream one job. `paths` is the page sequence, already expanded for copies.
+
+    With a patched ptouch-print this is a single invocation: every page after the
+    first is introduced by --page, so the run costs one blank leader in total.
+    Without the patch, fall back to one invocation per distinct label (grouping
+    consecutive duplicates into --copies), which prints the same labels but feeds
+    a leader per group.
+
+    Returns (ok, error_message, leaders) — leaders is how many blank leaders the
+    run actually cost, for the tape accounting in the reply.
+    """
+    if HAS_PAGE:
+        cmd = [PTOUCH]
+        if precut:
+            cmd.append("--precut")
+        for p in paths:
+            cmd += ["--image", p, "--page"]
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=30 + 10 * len(paths))
+        except subprocess.TimeoutExpired:
+            return False, "print timed out", 1
+        if r.returncode != 0:
+            return False, (r.stdout + r.stderr).strip() or f"ptouch-print exited {r.returncode}", 1
+        return True, "", 1
+
+    groups = _group_consecutive(paths)
+    for path, copies in groups:
+        cmd = [PTOUCH, "--copies", str(copies), "--image", path]
+        if precut:
+            cmd.insert(1, "--precut")
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=30 + 10 * copies)
+        except subprocess.TimeoutExpired:
+            return False, "print timed out", len(groups)
+        if r.returncode != 0:
+            return False, (r.stdout + r.stderr).strip() or f"ptouch-print exited {r.returncode}", len(groups)
+    return True, "", len(groups)
 
 
 def verify_after_print(est_seconds: float):
@@ -225,10 +319,10 @@ def keepalive_loop():
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "wms-print-bridge/1.5"
+    server_version = "wms-print-bridge/1.6"
 
     def _send(self, code: int, payload: dict):
-        if code >= 400 or self.path == "/print":
+        if code >= 400 or self.path.startswith("/print"):
             sys.stderr.write(f"{self.command} {self.path} -> {code} {json.dumps(payload)[:300]}\n")
             sys.stderr.flush()
         body = json.dumps(payload).encode()
@@ -244,11 +338,11 @@ class Handler(BaseHTTPRequestHandler):
         if time.time() - LAST_PRINT_DONE[0] < SETTLE_SECONDS:
             # Still in the post-job settling window: a status read here would time
             # out and look like a dead printer. It just printed — report last info.
-            return self._send(200, {"ok": True, "busy": True, **LAST_INFO})
+            return self._send(200, {"ok": True, "busy": True, "batchPages": HAS_PAGE, **LAST_INFO})
         if not PRINT_LOCK.acquire(timeout=5):
             # A print job is in progress — the printer is clearly alive; answer
             # from the last known info rather than colliding on the USB bus.
-            return self._send(200, {"ok": True, "busy": True, **LAST_INFO})
+            return self._send(200, {"ok": True, "busy": True, "batchPages": HAS_PAGE, **LAST_INFO})
         try:
             ok, info = printer_info()
             # A recoverable printer-error state (red LED) still counts as available:
@@ -267,20 +361,43 @@ class Handler(BaseHTTPRequestHandler):
                 "lastAgo": round(time.time() - KEEPALIVE_STATE["last"]) if KEEPALIVE_STATE["last"] else None,
                 "ok": KEEPALIVE_STATE["ok"],
             }
-        return self._send(200 if ok else 503, {"ok": ok, **info})
+        # batchPages tells the caller whether /print-batch really costs one leader
+        # or is silently degrading to one job per label.
+        return self._send(200 if ok else 503, {"ok": ok, "batchPages": HAS_PAGE, **info})
 
     def do_POST(self):  # noqa: N802
-        if self.path != "/print":
+        if self.path not in ("/print", "/print-batch"):
             return self._send(404, {"error": "not found"})
         length = int(self.headers.get("Content-Length") or 0)
         if length <= 0 or length > MAX_BODY:
             return self._send(413, {"error": "bad body size"})
         try:
             req = json.loads(self.rfile.read(length))
-            data_url = req["imageDataUrl"]
-            copies = min(MAX_COPIES, max(1, int(req.get("copies", 1))))
         except Exception:  # noqa: BLE001
             return self._send(400, {"error": "invalid request"})
+
+        # Both endpoints reduce to the same thing: an ordered list of labels, each
+        # with a copy count. /print is the one-label case.
+        try:
+            if self.path == "/print":
+                labels = [{"imageDataUrl": req["imageDataUrl"], "copies": req.get("copies", 1)}]
+            else:
+                labels = req["labels"]
+                if not isinstance(labels, list) or not labels:
+                    raise ValueError("labels must be a non-empty array")
+            labels = [
+                {
+                    "imageDataUrl": lb["imageDataUrl"],
+                    "copies": min(MAX_COPIES, max(1, int(lb.get("copies", 1)))),
+                }
+                for lb in labels
+            ]
+        except Exception:  # noqa: BLE001
+            return self._send(400, {"error": "invalid request"})
+
+        total_pages = sum(lb["copies"] for lb in labels)
+        if total_pages > MAX_PAGES:
+            return self._send(400, {"error": f"too many pages ({total_pages} > {MAX_PAGES})"})
 
         with PRINT_LOCK:
             wait_for_settle()
@@ -292,48 +409,94 @@ class Handler(BaseHTTPRequestHandler):
             if not info.get("maxPx"):
                 return self._send(503, {"error": info.get("error", "printer unavailable"), **info})
             LAST_INFO.update({k: v for k, v in info.items() if k != "error"})
+
+            # Render every label once, then expand copies by repeating its page —
+            # ptouch-print pages are just a sequence, so N copies is N pages and
+            # needs no --copies flag.
+            paths = []
+            page_px = []
+            labels_mm = []
+            tmpdir = tempfile.mkdtemp(prefix="wms-print-")
             try:
-                img = prepare_image(data_url, info["maxPx"])
-            except Exception as e:  # noqa: BLE001
-                return self._send(400, {"error": f"bad image: {e}"})
-            est = estimate_print_seconds(img.width, copies)
-            sys.stderr.write(
-                f"printing {copies} cop{'y' if copies == 1 else 'ies'}, "
-                f"tape {info.get('tapeMm')}mm, raster {img.width}x{img.height}px, ~{est:.0f}s\n"
-            )
-            sys.stderr.flush()
-            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
-                img.save(f, "PNG")
-                path = f.name
-            try:
-                retried = False
-                if stuck_error:
-                    sys.stderr.write(f"printer in error state ({info.get('error')}); attempting print anyway\n")
-                    sys.stderr.flush()
-                ok, err = run_print_job(path, copies)
-                if ok:
-                    ok, post = verify_after_print(est)
-                    err = post.get("error", "printer aborted the job")
-                if not ok:
-                    sys.stderr.write(f"print aborted ({err}); retrying once\n")
-                    sys.stderr.flush()
-                    retried = True
-                    time.sleep(3)
-                    ok, err = run_print_job(path, copies)
+                try:
+                    for i, lb in enumerate(labels):
+                        img = prepare_image(lb["imageDataUrl"], info["maxPx"])
+                        path = os.path.join(tmpdir, f"label-{i}.png")
+                        img.save(path, "PNG")
+                        labels_mm.append(round(label_length_mm(img.width), 1))
+                        for _ in range(lb["copies"]):
+                            paths.append(path)
+                            page_px.append(img.width)
+                except Exception as e:  # noqa: BLE001
+                    return self._send(400, {"error": f"bad image: {e}"})
+
+                est = estimate_print_seconds(page_px)
+                sys.stderr.write(
+                    f"printing {len(labels)} label{'' if len(labels) == 1 else 's'} "
+                    f"as {len(paths)} page{'' if len(paths) == 1 else 's'} "
+                    f"({'one job' if HAS_PAGE else 'no --page support: one job per label'}), "
+                    f"tape {info.get('tapeMm')}mm, ~{est:.0f}s\n"
+                )
+                sys.stderr.flush()
+                try:
+                    retried = False
+                    attempts = 1
+                    if stuck_error:
+                        sys.stderr.write(f"printer in error state ({info.get('error')}); attempting print anyway\n")
+                        sys.stderr.flush()
+                    ok, err, leaders = run_print_job(paths)
                     if ok:
                         ok, post = verify_after_print(est)
                         err = post.get("error", "printer aborted the job")
-                if not ok:
-                    # 0x0100 with a readable cassette is almost always contention:
-                    # the Cube refuses USB jobs while the Brother phone app holds
-                    # a Bluetooth session (root-caused 2026-07-21).
-                    if "0x0100" in err:
-                        err += " — if the Brother phone app is connected via Bluetooth, close it and retry"
-                    return self._send(500, {"error": f"print failed: {err}"})
+                    if not ok:
+                        sys.stderr.write(f"print aborted ({err}); retrying once\n")
+                        sys.stderr.flush()
+                        retried = True
+                        attempts = 2
+                        time.sleep(3)
+                        ok, err, leaders = run_print_job(paths)
+                        if ok:
+                            ok, post = verify_after_print(est)
+                            err = post.get("error", "printer aborted the job")
+                    if not ok:
+                        # 0x0100 with a readable cassette is almost always contention:
+                        # the Cube refuses USB jobs while the Brother phone app holds
+                        # a Bluetooth session (root-caused 2026-07-21).
+                        if "0x0100" in err:
+                            err += " — if the Brother phone app is connected via Bluetooth, close it and retry"
+                        return self._send(500, {"error": f"print failed: {err}"})
+                finally:
+                    LAST_PRINT_DONE[0] = time.time()
             finally:
-                LAST_PRINT_DONE[0] = time.time()
-                os.unlink(path)
-        payload = {"ok": True, "copies": copies, "tapeMm": info.get("tapeMm")}
+                for name in os.listdir(tmpdir):
+                    os.unlink(os.path.join(tmpdir, name))
+                os.rmdir(tmpdir)
+
+        # Geometry of what was actually printed. tapeUsedMm covers the delivered
+        # job only — a retried job burned roughly another leader-plus-labels that
+        # is not counted here, so treat the total as a floor when attempts > 1.
+        tape_used = sum(label_length_mm(px) for px in page_px) + LEADER_MM * leaders
+        if self.path == "/print":
+            payload = {
+                "ok": True,
+                "copies": labels[0]["copies"],
+                "tapeMm": info.get("tapeMm"),
+                "labelMm": labels_mm[0],
+                "tapeUsedMm": round(tape_used, 1),
+                "rasterPx": [page_px[0], info["maxPx"]],
+                "attempts": attempts,
+            }
+        else:
+            payload = {
+                "ok": True,
+                "labels": len(labels),
+                "pages": len(paths),
+                "leaders": leaders,
+                "tapeMm": info.get("tapeMm"),
+                "labelsMm": labels_mm,
+                "tapeUsedMm": round(tape_used, 1),
+                "attempts": attempts,
+            }
         if retried:
             payload["retried"] = True
         return self._send(200, payload)
@@ -343,8 +506,13 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    sys.stderr.write(
+        f"batch pages: {'supported' if HAS_PAGE else 'NOT supported by ' + PTOUCH}"
+        f"{'' if HAS_PAGE else ' — apply patches/ptouch-print-batch-pages.patch to stop wasting a leader per label'}\n"
+    )
     if KEEPALIVE_SECONDS > 0:
         sys.stderr.write(f"keepalive: status read every {KEEPALIVE_SECONDS}s\n")
-        sys.stderr.flush()
+    sys.stderr.flush()
+    if KEEPALIVE_SECONDS > 0:
         threading.Thread(target=keepalive_loop, daemon=True).start()
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()

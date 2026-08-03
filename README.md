@@ -37,10 +37,11 @@ flowchart LR
 
 | Path | What it is |
 |---|---|
-| [`bridge/bridge.py`](bridge/bridge.py) | Stdlib-only Python HTTP bridge: `GET /health`, `POST /print`. Wraps `ptouch-print`, scales the PNG to the tape's printable height, prints one job per copy so the auto-cutter separates labels. Serialises jobs under a lock, waits for the physical print to settle before verifying, and runs an optional keepalive probe that reports reachability in `/health` without touching the bus mid-job. |
+| [`bridge/bridge.py`](bridge/bridge.py) | Stdlib-only Python HTTP bridge: `GET /health`, `POST /print`, `POST /print-batch`. Wraps `ptouch-print`, scales each PNG to the tape's printable height, and prints a whole run as **one** job so the ~25mm blank leader is paid once rather than once per label. Serialises jobs under a lock, waits for the physical print to settle before verifying, and runs an optional keepalive probe that reports reachability in `/health` without touching the bus mid-job. |
 | [`bridge/ptouch-print-bridge.service`](bridge/ptouch-print-bridge.service) | systemd unit to keep it running. Carries `SupplementaryGroups=lp`, which is required on a headless host. |
 | [`udev/99-ptouch-print-bridge.rules`](udev/99-ptouch-print-bridge.rules) | **Required.** Gives the printer node a group the service can join. `ptouch-print`'s own rule relies on `uaccess`, which grants nothing without a local seat session. |
 | [`patches/ptouch-print-p710bt-init.patch`](patches/ptouch-print-p710bt-init.patch) | **Required** one-line fix for `ptouch-print`: the PT-P710BT needs the P700-family init sequence; without it every job silently fails with a media error. |
+| [`patches/ptouch-print-batch-pages.patch`](patches/ptouch-print-batch-pages.patch) | Adds `--page` to `ptouch-print`, so several *different* labels print as pages of one job. Stock `ptouch-print` concatenates multiple `--image` args into one long label, which is why batches used to cost a scrap leader each. Optional — without it `/print-batch` still works, but degrades to one job per label. See [`docs/hardware-notes.md`](docs/hardware-notes.md). |
 | [`snippets/render-label.ts`](snippets/render-label.ts) | Browser-side label renderer: tape presets, QR code + big readable ID + item name with adaptive font shrinking/wrapping for long names. |
 | [`snippets/proxy-endpoint.ts`](snippets/proxy-endpoint.ts) | Example server proxy endpoints (Nitro/h3 style, trivially portable to Express) between the HTTPS app and the bridge. |
 | [`docs/hardware-notes.md`](docs/hardware-notes.md) | Everything I learned the hard way: error codes, the blank-leader problem and `--precut`, auto power-off behaviour, print head geometry. |
@@ -56,6 +57,7 @@ sudo apt install gcc cmake make pkg-config libusb-1.0-0-dev libgd-dev gettext py
 git clone https://git.familie-radermacher.ch/linux/ptouch-print.git
 cd ptouch-print
 git apply /path/to/patches/ptouch-print-p710bt-init.patch
+git apply /path/to/patches/ptouch-print-batch-pages.patch   # optional: one leader per batch
 cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build
 sudo cp build/ptouch-print /usr/local/bin/
 cd -   # back to this repo -- the rule below is THIS repo's, not ptouch-print's

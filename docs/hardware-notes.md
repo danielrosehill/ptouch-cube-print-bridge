@@ -71,6 +71,37 @@ blank tape before the printed area. Options:
 
 The bridge uses `--precut` on every copy.
 
+### The leader is per *job*, not per label — and that used to be unfixable
+
+The 25mm cost is paid once per `ptouch-print` invocation, not once per label. Inside one
+invocation, every page but the last is finalized with `0x0C` (print, no feed) and only
+the last gets `0x1A` (print with feeding), so the tape reaches the cutter once; `--precut`
+cuts the pages apart with no further leader. That is why `--copies 10` has always cost one
+leader rather than ten.
+
+Stock `ptouch-print` gives you no way to spend that on *different* labels. Multiple
+`--image` arguments are `img_append`-ed into a single long label (see the job loop in
+`src/ptouch-print.c`), not paginated — so a run of N distinct labels means N invocations
+and N scrap leaders. Verified by reading the source 2026-08-03.
+
+`patches/ptouch-print-batch-pages.patch` adds `--page`, a separator that closes the
+current label and starts a new one:
+
+```bash
+ptouch-print --precut -i a.png --page -i b.png --page -i c.png   # 3 labels, 1 leader
+```
+
+Single-label behaviour is untouched, `--copies` still repeats the whole set, and a
+trailing or doubled `--page` is ignored. The bridge's `/print-batch` uses it, expanding
+each label's copy count into repeated pages, and `GET /health` reports `batchPages` so
+callers can tell whether the installed binary actually has it. Without the patch the
+bridge still prints correct labels — it just falls back to one job per label and the
+waste comes back.
+
+**`--chain` is not a substitute.** It skips the final feed, but each `ptouch-print`
+process re-inits the printer on open, so chaining across separate invocations does not
+carry a job over; it just leaves the last label stuck inside the machine.
+
 ## Print geometry
 
 - 180 dpi head, **128 dots** maximum printable height (on 24mm tape; narrower tapes
