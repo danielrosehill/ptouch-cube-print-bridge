@@ -57,30 +57,26 @@ LED), and the state flaps as the phone connects/disconnects. Retries keep
 
 The printer is located by USB vendor/product id (04f9:20af), never by port path.
 
-Keep-alive: this does NOT keep the printer awake, despite the name — measured
-2026-07-28, correcting the original 2026-07-21 assumption. The Cube powers off 60
-minutes after its last *print job*; a status read does not count as activity and
-does not defer it. Three independent windows from this bridge's own journal, with
-the 300s status-read keepalive running throughout: off 60m45s and 60m33s after the
-last POST /print, and ~55-60m after a power-on with no prints at all.
+Auto Power Off: the Cube shipped powering off 60 minutes after its last *print
+job* — a status read did not count as activity and did not defer it (measured
+2026-07-28 from this bridge's own journal: off 60m45s and 60m33s after the last
+POST /print, and ~55-60m after a power-on with no prints at all; the original
+2026-07-21 assumption that the keepalive kept it awake was wrong). Nothing over
+USB could wake it either: the printer is bus-powered, advertises no remote-wakeup
+bit, and drops off the USB bus entirely when it powers off.
 
-Nothing over USB can wake it either — the printer is bus-powered, advertises no
-remote-wakeup bit, and drops off the USB bus entirely when it powers off. So the
-background thread only *detects* state: it feeds the "keepalive" block in /health
-so callers can see reachability without hitting the bus. It never touches the bus
-while a print job holds PRINT_LOCK, and skips a tick if a print happened within the
-interval anyway. Set KEEPALIVE_SECONDS=0 to disable the polling.
+Fixed in the printer, not here, in two steps. Auto Power Off = None via Brother's
+Printer Setting Tool -> Device Settings (Windows/Mac and USB-only — Bluetooth, the
+Design&Print mobile app and ptouch-print all cannot set it), applied 2026-07-28;
+it lives in the printer's own NVRAM, so it survives reboots and re-cabling, and
+only a factory reset reverts it. Then a printer firmware update on 2026-08-04.
 
-The real fix lives in the printer, not here: Auto Power Off = None (the factory
-default is 60 min) in Brother's Printer Setting Tool -> Device Settings. That is
-Windows/Mac and USB-only — Bluetooth and the Design&Print mobile app cannot set it,
-and neither can ptouch-print. It is stored in the printer's own NVRAM, so it is a
-one-time change that survives reboots and re-cabling.
-
-**Applied 2026-07-28**, so the 60-minute power-off described above should no longer
-happen. A factory reset of the printer would revert it. The keepalive's state-change
-logging is now the cheapest way to verify: no "printer unreachable" line across a
->60 min idle window means the setting is holding.
+The 300s status-read keepalive only ever existed to *verify* that: its state-change
+logging was the cheap way to catch a >60 min idle window going unreachable. Retired
+2026-08-04 — KEEPALIVE_SECONDS now defaults to 0. Set it to a positive number of
+seconds to bring the polling back for diagnosis; the thread only samples state for
+the "keepalive" block in /health, never touches the bus while a print job holds
+PRINT_LOCK, and skips a tick if a print happened within the interval anyway.
 """
 import base64
 import io
@@ -122,10 +118,10 @@ LAST_INFO = {}
 SETTLE_SECONDS = 6.0
 LAST_PRINT_DONE = [0.0]
 
-# Keep-alive: seconds between idle status reads (0 disables). This only samples
-# reachability for /health — it does NOT defer the printer's auto-power-off (60 min
-# from the last print job on the PT-P710BT; see the module docstring).
-KEEPALIVE_SECONDS = int(os.environ.get("KEEPALIVE_SECONDS", "300"))
+# Keep-alive: seconds between idle status reads. Retired 2026-08-04 (default 0 =
+# off) — it never deferred the auto-power-off, and the power-off itself is fixed in
+# the printer. Set a positive number to sample reachability for /health again.
+KEEPALIVE_SECONDS = int(os.environ.get("KEEPALIVE_SECONDS", "0"))
 KEEPALIVE_STATE = {"last": 0.0, "ok": None, "skipped": 0}
 LAST_USB_ACTIVITY = time.time()
 
