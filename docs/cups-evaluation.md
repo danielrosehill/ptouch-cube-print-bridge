@@ -68,7 +68,7 @@ who owns the device.
 - `--precut` leader trimming (see [`hardware-notes.md`](hardware-notes.md))
 - `PRINT_LOCK` serialisation of all jobs
 - settle/verify timing around the physical print, not just the raster stream
-- the keepalive/health probe
+- the `/health` reachability probe
 
 The Foomatic path replaces the first of those with a static `PageSize` from a PPD
 and provides none of the rest. Moving to CUPS for standardisation's sake would

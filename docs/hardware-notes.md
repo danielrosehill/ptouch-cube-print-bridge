@@ -160,11 +160,15 @@ value is in NVRAM, so this should not need doing again — but if the printer is
 factory-reset (hold power while inserting the cassette, or *Reset* in the Setting
 Tool), it reverts to 60 min and the whole exercise repeats.
 
-Verification is free and needs no extra tooling: the bridge's keepalive logs a state
-transition whenever the printer becomes unreachable, so an *absence* of "printer
-unreachable" in `journalctl -u wms-print-bridge` across a >60 min idle window is the
-proof. The keepalive can't keep the printer awake, but it is exactly the right
-instrument for proving it no longer sleeps.
+Verification was free and needed no extra tooling: while it ran, the bridge's keepalive
+logged a state transition whenever the printer became unreachable, so an *absence* of
+"printer unreachable" in `journalctl -u wms-print-bridge` across a >60 min idle window
+was the proof. The keepalive could never keep the printer awake, but it was exactly the
+right instrument for proving it no longer sleeps.
+
+**Retired 2026-08-04**, after the setting held for a week and the printer's firmware was
+updated: `KEEPALIVE_SECONDS` now defaults to `0`. Set it to a positive number of seconds
+to put the instrument back if the printer ever starts sleeping again.
 
 Even with auto power-off disabled, still design for the printer being off — someone
 can always press the button. The bridge's `/health` probe fails while it's off, so the
